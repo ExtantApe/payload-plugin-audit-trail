@@ -2,7 +2,7 @@
 
 A tamper-evident audit trail for Payload: who changed which fields of which record, from where and through whom, never the values. Each record's entries are hash-chained, a seal chains them across the site, and a verify reports the first break.
 
-**Status:** early, 0.1.0, not on npm yet. 110 tests pass against a real Payload 3.92 with an in-memory MongoDB (a replica set). They cover what's recorded, failing closed with and without transactions, the value log and its startup refusals, read access, drafts, autosave and restores, the sink for other plugins, retention, and the chain: 40 changes at once without a fork, two seals at once, and tampering caught each way (an entry edited, the newest deleted, one removed or forged, a whole record's chain deleted after a seal, values edited, the first entry after a prune deleted), adopting a log kept before the plugin (verify after it, each kind of tampering with adopted entries, entries written around the plugin, running it twice, and pruning), passwords recorded by name with the password, hash and salt found nowhere in the trail or the logs, hidden fields changed by hooks, restores and bulk updates, concurrent and nested writes sharing a context, and a hook fanning out several account updates at once on one request. Verify is tested a page at a time against the answer the old read-it-all verify gave, for each kind of tampering, on a made-up trail of 3,130 entries read 50 at a time, starting from a seal, stopping early, and with reads that fail or come back out of order; and pruning two and three times, with a seal removed afterwards still caught. A separate branch tests it with MFA, Hats and Masq installed from npm. It isn't in use on any site yet.
+**Status:** early, 0.1.0, not on npm yet. the same 110 tests pass twice against a real Payload 3.92: once on an in-memory MongoDB (a replica set) and once on a throwaway PostgreSQL 18 server started by `embedded-postgres`, through `@payloadcms/db-postgres`. No other database has been tried (not SQLite, Vercel Postgres, Neon or a managed Postgres). They cover what's recorded, failing closed with and without transactions, the value log and its startup refusals, read access, drafts, autosave and restores, the sink for other plugins, retention, and the chain: 40 changes at once without a fork, two seals at once, and tampering caught each way (an entry edited, the newest deleted, one removed or forged, a whole record's chain deleted after a seal, values edited, the first entry after a prune deleted), adopting a log kept before the plugin (verify after it, each kind of tampering with adopted entries, entries written around the plugin, running it twice, and pruning), passwords recorded by name with the password, hash and salt found nowhere in the trail or the logs, hidden fields changed by hooks, restores and bulk updates, concurrent and nested writes sharing a context, and a hook fanning out several account updates at once on one request. Verify is tested a page at a time against the answer the old read-it-all verify gave, for each kind of tampering, on a made-up trail of 3,130 entries read 50 at a time, starting from a seal, stopping early, and with reads that fail or come back out of order; and pruning two and three times, with a seal removed afterwards still caught. A separate branch tests it with MFA, Hats and Masq installed from npm. It isn't in use on any site yet.
 
 ## What it does
 
@@ -34,7 +34,7 @@ A tamper-evident audit trail for Payload: who changed which fields of which reco
 
 ## On its own, and with others
 
-**On its own:** it needs MongoDB with transactions (or `onWriteError: 'log'`), the collections you list, and a users collection for actors. With no other plugin, `via` stays empty and entries come from collection changes and your own `recordEvent` calls.
+**On its own:** it needs MongoDB with transactions or Postgres (or `onWriteError: 'log'`), the collections you list, and a users collection for actors. With no other plugin, `via` stays empty and entries come from collection changes and your own `recordEvent` calls.
 
 **Works with:**
 - **Hats, Masq and Guardians:** your `via` resolver can use `hatsStateOf(req)`, `masqueraderOf(req)` and `viaGuardian(req)`, so an entry says how a change was made.
@@ -96,7 +96,9 @@ If the collection already holds entries written before this plugin, they have no
 
 ## Limits
 
-- MongoDB only for now (it relies on transactions and the adapter's conditional updates).
+- MongoDB and Postgres (`@payloadcms/db-postgres`) are tested. It relies on transactions and the adapter's conditional updates, so an adapter without either won't work. SQLite and the Vercel Postgres adapter aren't tested.
+- On Postgres a required `extraFields` entry that your resolver leaves empty can't be stored (the database refuses a null). With `onWriteError: 'fail'` the change is undone, as on MongoDB. With `'log'` the change is kept and the entry is lost, and the error is logged. MongoDB stores such an entry without the field.
+- On Postgres, record ids are numbers, and `subjectId` is stored as text either way.
 - Verify reads a page at a time, but it still reads every entry it checks, twice (once along each record's chain, once along the seals), so a full verify of a very large trail takes a while: use `from` between full runs. Sealing reads one interval's entries at once, and adoption the whole old log.
 - Verify's paging sorts by each record's chain. The plugin declares a compound index for it (`chainKey`, `seq`) in the trail collection's `indexes`, so it's built wherever your site builds Payload's indexes, at startup or by your own script. Without it verify gives the same answers, but the database sorts the trail again for every page, which is slow on a large trail and can fail a read (reported as a failed verification) where the database won't sort that much.
 - Changes written while a verify runs can show as a break in that run (a head moved after its chain was read). Run it again.
@@ -105,7 +107,8 @@ If the collection already holds entries written before this plugin, they have no
 ## Commands
 
 ```bash
-npm test          # Vitest, in-memory MongoDB replica set
+npm test              # Vitest, in-memory MongoDB replica set
+npm run test:postgres # the same tests on a throwaway PostgreSQL server (embedded-postgres)
 npm run typecheck
 npm run build
 ```

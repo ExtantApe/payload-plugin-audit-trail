@@ -1,14 +1,13 @@
-import { mongooseAdapter } from '@payloadcms/db-mongodb'
-import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { BasePayload, buildConfig, type CollectionConfig, type Payload } from 'payload'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { rawCollection, startDb, type TestDb } from './db.js'
 import { canonical, entryHash } from '../src/chain.js'
 import { auditTrail, pruneAuditTrail, recordEvent, sealAuditTrail, verifyAuditTrail, type AuditTrailOptions } from '../src/index.js'
 
 /** Each test gets its own made-up site and database, since verify reads the whole trail. */
 const SECRET = 'a-made-up-app-secret-for-tests-only-0123456789'
-let mongo: MongoMemoryReplSet
+let testDb: TestDb
 let n = 0
 const sealed: { digest: string; kind: string; upTo: string }[] = []
 const notes: CollectionConfig = { slug: 'notes', access: { read: () => true, create: () => true, update: () => true, delete: () => true }, fields: [{ name: 'text', type: 'text' }, { name: 'count', type: 'number' }] }
@@ -19,7 +18,7 @@ async function site(grace = 0, extraFields: { name: string; type: 'text'; requir
     secret: SECRET,
     telemetry: false,
     typescript: { autoGenerate: false },
-    db: mongooseAdapter({ url: mongo.getUri(`chain${++n}`), ensureIndexes: true }),
+    db: testDb.adapter(`chain${++n}`),
     collections: [users, notes],
     plugins: [auditTrail({ collections: ['notes'], values: { notes: ['count'] }, sealGraceMinutes: grace, extraFields, extra: () => ({ tenant: 't1' }), onSeal: (s) => void sealed.push(s), ...more })],
   })
@@ -27,7 +26,7 @@ async function site(grace = 0, extraFields: { name: string; type: 'text'; requir
 }
 const make = (p: Payload, text = 'note') => p.create({ collection: 'notes', data: { text, count: 1 } as never, overrideAccess: true }) as unknown as Promise<{ id: string }>
 const edit = (p: Payload, id: string, data: Record<string, unknown>) => p.update({ collection: 'notes', id, data: data as never, overrideAccess: true })
-const raw = (p: Payload, slug: string) => (p.db as any).collections[slug].collection
+const raw = (p: Payload, slug: string) => rawCollection(p, slug)
 const trail = async (p: Payload) => (await p.find({ collection: 'audit-events' as never, sort: ['chainKey', 'seq'], limit: 0, pagination: false, overrideAccess: true, showHiddenFields: true })).docs as unknown as Record<string, any>[]
 /** Seals up to now (the test sites have no grace), then waits a moment so later changes fall after the seal. */
 const sealNow = async (p: Payload) => {
@@ -37,10 +36,10 @@ const sealNow = async (p: Payload) => {
 }
 
 beforeAll(async () => {
-  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } })
+  testDb = await startDb()
 }, 120_000)
 afterAll(async () => {
-  await mongo?.stop()
+  await testDb?.stop()
 })
 
 describe('the chain', () => {

@@ -160,6 +160,38 @@ function stored(value: unknown, max: number): unknown {
   return Buffer.byteLength(text) > max ? { truncated: true, bytes: Buffer.byteLength(text) } : (plain ?? null)
 }
 
+/**
+ * Runs a write that may fail without taking the caller's transaction down with it. MongoDB lets a transaction go on
+ * after a failed write. Postgres does not: the transaction is aborted, and the change with it. On a Postgres adapter
+ * the write runs inside a savepoint that is rolled back if it throws. Anywhere else it runs as it is.
+ */
+async function inSavepoint<T>(payload: Payload, req: PayloadRequest | undefined, fn: () => Promise<T>): Promise<T> {
+  const id = req?.transactionID ? await Promise.resolve(req.transactionID).catch(() => null) : null
+  const db = id ? ((payload.db as unknown as { sessions?: Record<string, { db?: { execute?: (q: unknown) => Promise<unknown> } }> }).sessions?.[String(id)]?.db) : undefined
+  if (!db?.execute) return fn()
+  let sql: ((s: TemplateStringsArray, ...v: unknown[]) => unknown) | undefined
+  for (const name of ['@payloadcms/db-postgres/drizzle', '@payloadcms/db-vercel-postgres/drizzle']) {
+    try {
+      sql = ((await import(name)) as { sql?: typeof sql }).sql
+      if (sql) break
+    } catch {
+      /* not installed: try the next */
+    }
+  }
+  if (!sql) return fn()
+  const point = `audit_trail_${Math.random().toString(36).slice(2, 10)}`
+  const raw = (sql as unknown as { raw: (t: string) => unknown }).raw
+  await db.execute(raw(`SAVEPOINT ${point}`))
+  try {
+    const out = await fn()
+    await db.execute(raw(`RELEASE SAVEPOINT ${point}`))
+    return out
+  } catch (error) {
+    await db.execute(raw(`ROLLBACK TO SAVEPOINT ${point}`))
+    throw error
+  }
+}
+
 async function write(payload: Payload, o: Resolved, entry: AuditEntry, values?: Record<string, { before: unknown; after: unknown }>) {
   const req = entry.req
   const extra = Object.fromEntries(Object.entries(entry.extra ?? {}).filter(([k]) => o.extraNames.includes(k)))
@@ -201,7 +233,7 @@ async function write(payload: Payload, o: Resolved, entry: AuditEntry, values?: 
         if (o.onWriteError === 'log') {
           // A Payload operation that fails rolls back the whole transaction it's in, the change included, while
           // this mode reports success. Written through the adapter instead, a failed entry can't undo the change.
-          await payload.db.create({ collection: o.slug, data: { ...data, at: new Date(data.at) }, ...(r ? { req: r } : {}) } as never)
+          await inSavepoint(payload, r, () => payload.db.create({ collection: o.slug, data: { ...data, at: new Date(data.at) }, ...(r ? { req: r } : {}) } as never))
         } else await payload.create({ collection: o.slug as never, data: data as never, overrideAccess: true, ...(r ? { req: r } : {}) })
         if (own) await payload.db.commitTransaction(own)
         return
@@ -588,7 +620,9 @@ class Stop extends Error {
 }
 
 const OUT_OF_ORDER = 'the trail came back out of order here, so nothing past this point was checked'
-const byAtThenId = (a: Record<string, any>, b: Record<string, any>) => (a.at < b.at ? -1 : a.at > b.at ? 1 : String(a.id) < String(b.id) ? -1 : 1)
+/** Ids are numbers on Postgres and strings on MongoDB; the database sorts numbers as numbers, so this does too. */
+const cmpId = (a: unknown, b: unknown) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0)
+const byAtThenId = (a: Record<string, any>, b: Record<string, any>) => (a.at < b.at ? -1 : a.at > b.at ? 1 : cmpId(a.id, b.id) || 1)
 const allOf = (parts: Record<string, unknown>[]) => (parts.length ? { and: parts } : {})
 const hashedWhere = [{ hash: { exists: true } }, { hash: { not_equals: '' } }]
 
