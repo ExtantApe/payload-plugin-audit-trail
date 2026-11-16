@@ -1,6 +1,7 @@
 import { mongooseAdapter } from '@payloadcms/db-mongodb'
 import { postgresAdapter } from '@payloadcms/db-postgres'
 import EmbeddedPostgres from 'embedded-postgres'
+import pg from 'pg'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
@@ -38,18 +39,48 @@ export async function startDb(): Promise<TestDb> {
   process.env.PAYLOAD_FORCE_DRIZZLE_PUSH = 'true'
   const dir = mkdtempSync(join(tmpdir(), 'audit-trail-pg-'))
   const port = await freePort()
-  const pg = new EmbeddedPostgres({ databaseDir: dir, user: 'postgres', password: 'made-up-pw', port, persistent: false, postgresFlags: ['-c', 'max_connections=1000'], onLog: () => {}, onError: () => {} })
-  await pg.initialise()
-  await pg.start()
-  const pools: any[] = []
+  const server = new EmbeddedPostgres({ databaseDir: dir, user: 'postgres', password: 'made-up-pw', port, persistent: false, postgresFlags: ['-c', 'max_connections=1000'], onLog: () => {}, onError: () => {} })
+  await server.initialise()
+  await server.start()
+  // Payload's adapter destroy() leaves the pg pool open, and its connect() checks out one client and never gives it back, so pool.end() would wait forever.
+  // Every pool this suite makes is kept, along with that first client, and stop() hands the client back and ends the pool before the server stops.
+  const pools: { pool: any; first?: any }[] = []
+  class TrackedPool extends pg.Pool {
+    constructor(opts: any) {
+      super(opts)
+      pools.push({ pool: this })
+    }
+    connect(...args: any[]): any {
+      const entry = pools.find((e) => e.pool === this)!
+      if (args.length || entry.first) return (super.connect as any)(...args)
+      return (super.connect as any)().then((c: any) => ((entry.first = c), c))
+    }
+  }
   return {
-    adapter: (name, o = {}) => {
-      const a = postgresAdapter({ pool: { connectionString: `postgres://postgres:made-up-pw@127.0.0.1:${port}/postgres`, max: 10 }, schemaName: name.replace(/[^a-z0-9_]/gi, '_').toLowerCase(), ...(o.transactions === false ? { transactionOptions: false } : {}) } as never)
-      pools.push(a)
-      return a
-    },
+    adapter: (name, o = {}) =>
+      postgresAdapter({
+        pg: { ...pg, Pool: TrackedPool },
+        pool: { connectionString: `postgres://postgres:made-up-pw@127.0.0.1:${port}/postgres`, max: 10 },
+        schemaName: name.replace(/[^a-z0-9_]/gi, '_').toLowerCase(),
+        ...(o.transactions === false ? { transactionOptions: false } : {}),
+      } as never),
     stop: async () => {
-      await pg.stop()
+      for (const { pool, first } of pools.splice(0)) {
+        try {
+          first?.release()
+        } catch {}
+        if (!pool.ended) await pool.end()
+      }
+      // pool.end() returns before the server has seen every socket close, so wait until it reports none left (up to 10 seconds).
+      const probe = new pg.Client({ connectionString: `postgres://postgres:made-up-pw@127.0.0.1:${port}/postgres` })
+      await probe.connect()
+      for (let i = 0; i < 100; i++) {
+        const { rows } = await probe.query('select count(*)::int as n from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()')
+        if (rows[0].n === 0) break
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      await probe.end()
+      await server.stop()
       rmSync(dir, { recursive: true, force: true })
     },
   }
