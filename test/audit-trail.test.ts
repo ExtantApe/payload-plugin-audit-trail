@@ -1,8 +1,7 @@
-import { mongooseAdapter } from '@payloadcms/db-mongodb'
-import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { BasePayload, buildConfig, createLocalReq, getPayload, type CollectionConfig, type Payload, type PayloadRequest } from 'payload'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
+import { rawRows, startDb, type TestDb } from './db.js'
 import { auditTrail, fromPluginEvent, pruneAuditTrail, recordEvent, sealAuditTrail, verifyAuditTrail, type AuditTrailOptions } from '../src/index.js'
 
 /**
@@ -12,7 +11,7 @@ import { auditTrail, fromPluginEvent, pruneAuditTrail, recordEvent, sealAuditTra
 type U = { id: string; email: string; role: string }
 const SECRET = 'a-made-up-app-secret-for-tests-only-0123456789'
 let payload: Payload
-let mongo: MongoMemoryReplSet
+let testDb: TestDb
 let admin: U
 let member: U
 let via: 'none' | 'hats' = 'none'
@@ -110,7 +109,7 @@ const base: AuditTrailOptions = {
   extra: () => ({ tenant: 't1' }),
 }
 const cfg = (opts: AuditTrailOptions = base, dbExtra: Record<string, unknown> = {}) =>
-  buildConfig({ secret: SECRET, telemetry: false, typescript: { autoGenerate: false }, db: mongooseAdapter({ url: mongo.getUri('audit'), ensureIndexes: true, ...dbExtra }), collections: [users, entries, plain], plugins: [auditTrail(opts)] })
+  buildConfig({ secret: SECRET, telemetry: false, typescript: { autoGenerate: false }, db: testDb.adapter('audit', dbExtra), collections: [users, entries, plain], plugins: [auditTrail(opts)] })
 
 const events = async (where: Record<string, unknown> = {}) =>
   (await payload.find({ collection: 'audit-events' as never, where: where as never, sort: '-at', limit: 50, depth: 0, overrideAccess: true, showHiddenFields: true })).docs as unknown as Record<string, any>[]
@@ -122,7 +121,7 @@ const as = async (user: U | null, context: Record<string, unknown> = {}) => {
 const newEntry = async (data: Record<string, unknown> = {}) => (await payload.create({ collection: 'studbook-entries', data: { name: 'Made Up', studbookNo: 'SB-1', _status: 'published', ...data } as never, overrideAccess: true })) as unknown as Record<string, any>
 
 beforeAll(async () => {
-  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } })
+  testDb = await startDb()
   payload = await getPayload({ config: await cfg() })
   admin = (await payload.create({ collection: 'users', data: { email: 'admin@example.invalid', password: 'pw-admin-long', role: 'admin' } as never })) as unknown as U
   member = (await payload.create({ collection: 'users', data: { email: 'member@example.invalid', password: 'pw-member-long', role: 'member' } as never })) as unknown as U
@@ -130,7 +129,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await payload?.destroy?.()
-  await mongo?.stop()
+  await testDb?.stop()
 })
 
 describe('what it records', () => {
@@ -189,7 +188,7 @@ describe('failing closed', () => {
   })
 
   it('won’t start without transactions unless told to log instead; with `log`, it starts and lets a failed entry through', async () => {
-    const noTx = { transactionOptions: false as const }
+    const noTx = { transactions: false }
     await expect(new BasePayload().init({ config: await cfg(base, noTx) })).rejects.toThrow(/no transactions/)
     const logged = await new BasePayload().init({ config: await cfg({ ...base, onWriteError: 'log' }, noTx) })
     const e = (await logged.create({ collection: 'studbook-entries', data: { notes: 'before', _status: 'published' } as never, overrideAccess: true })) as unknown as { id: string }
@@ -231,7 +230,7 @@ describe('the value log', () => {
       ],
     }
     const build = (opts: Partial<AuditTrailOptions>, collections: CollectionConfig[] = [users, plain, kits]) =>
-      buildConfig({ secret: SECRET, telemetry: false, typescript: { autoGenerate: false }, db: mongooseAdapter({ url: mongo.getUri('refusals') }), collections, plugins: [auditTrail({ collections: ['users', 'kits'], ...opts })] })
+      buildConfig({ secret: SECRET, telemetry: false, typescript: { autoGenerate: false }, db: testDb.adapter('refusals', { indexes: false }), collections, plugins: [auditTrail({ collections: ['users', 'kits'], ...opts })] })
     const kit = (names: string[], extra: Partial<AuditTrailOptions> = {}) => build({ values: { kits: names }, ...extra })
     await expect(kit(['cipher'])).rejects.toThrow(/secret or encrypted/)
     await expect(kit(['quiet'])).rejects.toThrow(/hidden/)
@@ -278,19 +277,20 @@ describe('drafts and versions', () => {
 
 describe('autosave can’t hide a change', () => {
   it('is recorded on a collection without drafts, for a non-draft save sent with autosave, and for a draft save', async () => {
-    const count = async (id: string) => (await events({ subjectId: { equals: id } })).length
+    const count = async (id: string) => (await events({ subjectId: { equals: String(id) }, subjectCollection: { equals: 'plain-notes' } })).length
+    const countSb = async (id: string) => (await events({ subjectId: { equals: String(id) }, subjectCollection: { equals: 'studbook-entries' } })).length
     const note = (await payload.create({ collection: 'plain-notes', data: { text: 'one' } as never, overrideAccess: true })) as unknown as { id: string }
     await payload.update({ collection: 'plain-notes', id: note.id, data: { text: 'two' } as never, draft: true, autosave: true, overrideAccess: true } as never)
     expect(await count(note.id)).toBe(2)
     const e = await newEntry({ notes: 'a' })
-    const start = await count(e.id)
+    const start = await countSb(e.id)
     await payload.update({ collection: 'studbook-entries', id: e.id, data: { notes: 'b' } as never, draft: false, autosave: true, overrideAccess: true } as never)
-    expect(await count(e.id)).toBe(start + 1)
+    expect(await countSb(e.id)).toBe(start + 1)
     await payload.update({ collection: 'studbook-entries', id: e.id, data: { notes: 'c' } as never, draft: true, overrideAccess: true } as never)
-    expect(await count(e.id)).toBe(start + 2)
+    expect(await countSb(e.id)).toBe(start + 2)
     // And the real thing is still skipped.
     await payload.update({ collection: 'studbook-entries', id: e.id, data: { notes: 'typing' } as never, draft: true, autosave: true, overrideAccess: true } as never)
-    expect(await count(e.id)).toBe(start + 2)
+    expect(await countSb(e.id)).toBe(start + 2)
   })
 
   it('records another record changed by a hook during a real autosave', async () => {
@@ -305,7 +305,7 @@ describe('a sink for other plugins', () => {
   it('records named events, refuses unknown actions, and fails the caller when an event can’t be recorded', async () => {
     const req = (await as(admin)).req
     await recordEvent(payload, { action: 'masquerade', subject: { collection: 'users', id: member.id }, reason: 'support request', req })
-    expect((await events({ action: { equals: 'masquerade' } }))[0]!).toMatchObject({ actor: admin.id, subjectId: member.id })
+    expect((await events({ action: { equals: 'masquerade' } }))[0]!).toMatchObject({ actor: admin.id, subjectId: String(member.id) })
     await expect(recordEvent(payload, { action: 'teleport', subject: { collection: 'users', id: member.id }, req })).rejects.toThrow(/isn't an action/)
     const hatsEvent = fromPluginEvent((e: { type: string; account: string; req: PayloadRequest }) => ({ action: 'hats', subject: { collection: 'users', id: e.account }, reason: e.type, req: e.req }))
     await hatsEvent({ type: 'switched', account: member.id, req })
@@ -344,10 +344,10 @@ describe('retention', () => {
 
 /** Everything stored for the trail, raw from the database, hidden fields and values included. */
 const everythingStored = async () => {
-  const raw = async (slug: string) => JSON.stringify(await payload.db.collections[slug]!.find({}).lean())
+  const raw = async (slug: string) => JSON.stringify(await rawRows(payload, slug))
   return (await raw('audit-events')) + (await raw('audit-events-heads')) + (await raw('audit-events-seals'))
 }
-const rawUser = async (id: string) => (await payload.db.collections.users!.findById(id).lean()) as unknown as { hash: string; salt: string }
+const rawUser = async (id: string) => (await rawRows(payload, 'users')).find((u) => String(u._id ?? u.id) === String(id)) as unknown as { hash: string; salt: string }
 /** Every log line while `fn` runs, as text. */
 const logsDuring = async (fn: () => Promise<unknown>) => {
   const lines: string[] = []

@@ -1,8 +1,7 @@
-import { mongooseAdapter } from '@payloadcms/db-mongodb'
-import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { buildConfig, getPayload, type Payload } from 'payload'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { rawCollection, startDb, type TestDb } from './db.js'
 import { adoptExistingEntries, auditTrail, pruneAuditTrail, sealAuditTrail, verifyAuditTrail } from '../src/index.js'
 
 /**
@@ -12,10 +11,10 @@ import { adoptExistingEntries, auditTrail, pruneAuditTrail, sealAuditTrail, veri
 type Doc = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
 
 let payload: Payload
-let mongo: MongoMemoryReplSet
+let testDb: TestDb
 const DAY = 86_400_000
 
-const raw = () => (payload.db as unknown as { collections: Record<string, { collection: { insertMany: (d: object[]) => Promise<unknown>; updateOne: (q: object, u: object) => Promise<unknown>; deleteOne: (q: object) => Promise<unknown>; deleteMany: (q: object) => Promise<unknown> } }> }).collections
+const raw = () => new Proxy({} as Record<string, { collection: any }>, { get: (_t, slug: string) => ({ collection: rawCollection(payload, slug) }) }) // eslint-disable-line @typescript-eslint/no-explicit-any
 /** Writes entries the way the old site did: straight into the collection, with no hash. */
 const oldEntries = async (n: number, daysAgo = 30) => {
   const docs = Array.from({ length: n }, (_, i) => ({ at: new Date(Date.now() - daysAgo * DAY + i * 1000), action: 'update', subjectCollection: 'notes', subjectId: `note-${i}`, origin: 'web', changedFields: ['text'], tenant: 't1', run: `run-${i}` }))
@@ -25,13 +24,13 @@ const unhashed = async () => (await payload.find({ collection: 'audit-events' as
 const write = (text: string) => payload.create({ collection: 'notes' as never, data: { text } as never, overrideAccess: true })
 
 beforeAll(async () => {
-  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } })
+  testDb = await startDb()
   payload = await getPayload({
     config: await buildConfig({
       secret: 'a-made-up-app-secret-for-tests-only-0123456789',
       telemetry: false,
       typescript: { autoGenerate: false },
-      db: mongooseAdapter({ url: mongo.getUri('adopt'), ensureIndexes: true }),
+      db: testDb.adapter('adopt'),
       collections: [{ slug: 'users', auth: true, fields: [] }, { slug: 'notes', access: { read: () => true }, fields: [{ name: 'text', type: 'text' }] }],
       plugins: [auditTrail({ collections: ['notes'], extraFields: [{ name: 'tenant', type: 'text' }, { name: 'run', type: 'text' }], extra: () => ({ tenant: 't1' }) })],
     }),
@@ -40,7 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await payload?.destroy?.()
-  await mongo?.stop()
+  await testDb?.stop()
 })
 
 beforeEach(async () => {

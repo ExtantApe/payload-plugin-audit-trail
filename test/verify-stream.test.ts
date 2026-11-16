@@ -1,8 +1,7 @@
-import { mongooseAdapter } from '@payloadcms/db-mongodb'
-import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { buildConfig, getPayload, type Payload } from 'payload'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { DB, rawCollection, startDb, type TestDb } from './db.js'
 import { entryHash, sealDigest, sealHasher } from '../src/chain.js'
 import { adoptExistingEntries, auditTrail, pruneAuditTrail, sealAuditTrail, verifyAuditTrail, type VerifyArgs, type VerifyProgress, type VerifyResult } from '../src/index.js'
 import { legacyVerify } from './legacy-verify.js'
@@ -14,14 +13,14 @@ import { legacyVerify } from './legacy-verify.js'
 type Doc = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
 
 let p: Payload
-let mongo: MongoMemoryReplSet
+let testDb: TestDb
 const DAY = 86_400_000
 const EVENTS = 'audit-events'
 const HEADS = 'audit-events-heads'
 const SEALS = 'audit-events-seals'
 const sealed: { digest: string; kind: string; upTo: string }[] = []
 
-const raw = (slug: string) => (p.db as unknown as { collections: Record<string, { collection: any }> }).collections[slug]!.collection // eslint-disable-line @typescript-eslint/no-explicit-any
+const raw = (slug: string) => rawCollection(p, slug)
 const make = (text = 'note') => p.create({ collection: 'notes' as never, data: { text, count: 1 } as never, overrideAccess: true }) as unknown as Promise<{ id: string }>
 const edit = (id: string, data: Doc) => p.update({ collection: 'notes' as never, id, data: data as never, overrideAccess: true })
 const read = async (slug: string, sort: string[]) => (await p.find({ collection: slug as never, sort, limit: 0, pagination: false, depth: 0, overrideAccess: true, showHiddenFields: true })).docs as unknown as Doc[]
@@ -89,13 +88,13 @@ async function longTrail(count: number, chains: number, start: number, burst: [n
 }
 
 beforeAll(async () => {
-  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } })
+  testDb = await startDb()
   p = await getPayload({
     config: await buildConfig({
       secret: 'a-made-up-app-secret-for-tests-only-0123456789',
       telemetry: false,
       typescript: { autoGenerate: false },
-      db: mongooseAdapter({ url: mongo.getUri('stream'), ensureIndexes: true }),
+      db: testDb.adapter('stream'),
       collections: [
         { slug: 'users', auth: true, fields: [] },
         { slug: 'notes', access: { read: () => true }, fields: [{ name: 'text', type: 'text' }, { name: 'count', type: 'number' }] },
@@ -107,7 +106,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await p?.destroy?.()
-  await mongo?.stop()
+  await testDb?.stop()
 })
 
 beforeEach(async () => {
@@ -624,7 +623,9 @@ describe('failing closed when the trail can’t be read properly', () => {
     const digest = sealDigest(s3.digest, [], new Date(s3.upTo).toISOString(), 'checkpoint')
     await raw(SEALS).insertOne({ kind: 'checkpoint', seq: 3, prevDigest: s3.digest, digest, upTo: new Date(s3.upTo), count: 0 })
     await raw(HEADS).updateOne({ key: '__seal__' }, { $set: { hash: digest } })
-    for (const pageSize of [1, 2, 1000]) expect(await verifyAuditTrail(p, { pageSize }), `page size ${pageSize}`).toMatchObject({ ok: false, finished: false, firstBreak: { id: 'audit-events-seals at 3', reason: expect.stringMatching(/two rows share this position/) } })
+    // Postgres gives two rows with one seq in no fixed order, so it may reach the link break before the shared position. Either way it isn't a pass.
+    if (DB === 'postgres') for (const pageSize of [1, 2, 1000]) expect((await verifyAuditTrail(p, { pageSize })).ok, `page size ${pageSize}`).toBe(false)
+    else for (const pageSize of [1, 2, 1000]) expect(await verifyAuditTrail(p, { pageSize }), `page size ${pageSize}`).toMatchObject({ ok: false, finished: false, firstBreak: { id: 'audit-events-seals at 3', reason: expect.stringMatching(/two rows share this position/) } })
   })
 
   it('chains that come round again, each whole and well-formed, are a failed verification', async () => {
@@ -730,6 +731,12 @@ describe('pruning more than once', () => {
   it('the paging index is part of the collection’s config, and verify still works without it', async () => {
     const config = p.collections[EVENTS as never] as unknown as { config: { indexes?: { fields: string[] }[] } }
     expect(config.config.indexes).toEqual([{ fields: ['chainKey', 'seq'] }])
+    if (DB === 'postgres') {
+      // The drop and rebuild use MongoDB's index commands; on Postgres only the declared config is checked here.
+      await story()
+      expect(await agree()).toMatchObject({ ok: true, checked: 10 })
+      return
+    }
     const name = ((await raw(EVENTS).indexes()) as { name: string; key: Doc }[]).find((i) => JSON.stringify(i.key) === '{"chainKey":1,"seq":1}')?.name
     expect(name).toBeTruthy()
     await story()

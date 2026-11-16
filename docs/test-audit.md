@@ -1,5 +1,14 @@
 # Test audit
 
+## 2026-11-16: Postgres
+
+Promise: the plugin behaves the same on Payload's Postgres adapter as on MongoDB. Every one of the 110 tests runs on both (`npm test`, `npm run test:postgres`), so each row above maps to the same test on both databases. Postgres passed three runs in a row.
+
+- Covered on Postgres: entries written on create, update and delete; the append-only and no-read refusals (the trail, heads and seals refuse every write); verify, `from`, `stopAfter` and its failed-read cases; concurrent writes (40 records at once and 10 on one) and two seals at once; adoption; pruning once, twice and three times; the sink for other plugins; `onWriteError: 'log'` with and without transactions.
+- Gaps found and fixed, each with an existing test that failed first: verify ordered numeric ids as text (the 40-at-once test, intermittently); a failed entry in `log` mode aborted the change's transaction (the log-mode tests); two helpers in the tests counted by `subjectId` alone, which collides across collections when ids are numbers.
+- Differences accepted, with the test changed to say so: a required `extraFields` entry left empty isn't written on Postgres (log-mode test expects 0 entries there, 2 on MongoDB); two seals sharing one position are reached in no fixed order on Postgres, so that test expects a failed verification on either reason there; the MongoDB index drop and rebuild is skipped on Postgres, where only the declared index and verify are checked.
+- Skipped: SQLite, Vercel Postgres, Neon and managed Postgres (no in-process server was tried for them; a test here would only repeat the Postgres run), and older Postgres versions.
+
 ## 2026-11-10: full self-audit
 
 Every promise in the README, docs/decisions.md and ADR 0001, against the tests at b7a70e8 plus the ones added here. Baseline: 38 tests. Now: 52.

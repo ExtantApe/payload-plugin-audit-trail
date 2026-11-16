@@ -1,13 +1,12 @@
-import { mongooseAdapter } from '@payloadcms/db-mongodb'
-import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import { buildConfig, getPayload, type Payload } from 'payload'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
+import { DB, startDb, type TestDb } from './db.js'
 import { auditTrail, fromPluginEvent, recordEvent, verifyAuditTrail } from '../src/index.js'
 
 // `onWriteError: 'log'`, with and without transactions: a failed entry must never lose the change or break the chain.
 type Doc = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
-let mongo: MongoMemoryReplSet
+let testDb: TestDb
 const make = async (name: string, transactions: boolean) =>
   getPayload({
     key: name,
@@ -15,7 +14,7 @@ const make = async (name: string, transactions: boolean) =>
       secret: 'a-made-up-app-secret-for-tests-only-0123456789',
       telemetry: false,
       typescript: { autoGenerate: false },
-      db: mongooseAdapter({ url: mongo.getUri(name), ensureIndexes: true, ...(transactions ? {} : { transactionOptions: false }) }),
+      db: testDb.adapter(name, { transactions }),
       collections: [{ slug: 'users', auth: true, fields: [] }, { slug: 'notes', access: { read: () => true }, fields: [{ name: 'text', type: 'text' }, { name: 'quiet', type: 'text', hidden: true }] }],
       plugins: [
         auditTrail({
@@ -31,10 +30,10 @@ const make = async (name: string, transactions: boolean) =>
   } as never)
 
 beforeAll(async () => {
-  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } })
+  testDb = await startDb()
 }, 120_000)
 afterAll(async () => {
-  await mongo?.stop()
+  await testDb?.stop()
 })
 
 const entries = async (p: Payload) => (await p.find({ collection: 'audit-events' as never, pagination: false, depth: 0, overrideAccess: true, showHiddenFields: true })).docs as Doc[]
@@ -45,14 +44,15 @@ describe("onWriteError: 'log'", () => {
     const note = (await p.create({ collection: 'notes' as never, data: { text: 'first' } as never, overrideAccess: true })) as Doc
     await p.update({ collection: 'notes' as never, id: note.id, data: { text: 'second' } as never, overrideAccess: true })
     expect(((await p.findByID({ collection: 'notes' as never, id: note.id, overrideAccess: true })) as Doc).text).toBe('second')
-    expect((await entries(p)).length).toBe(2)
+    // MongoDB stores an entry without the required site field. Postgres refuses it (NOT NULL), so the entries aren't written, and the change stays.
+    expect((await entries(p)).length).toBe(DB === 'mongo' ? 2 : 0)
     expect(await verifyAuditTrail(p)).toMatchObject({ ok: true })
     await p.destroy()
   })
 
   it('without transactions, puts the head back when an entry fails, so verify never reports a false break', async () => {
     const p = await make('lognotx', false)
-    const note = (await p.create({ collection: 'notes' as never, data: { text: 'first' } as never, overrideAccess: true })) as Doc
+    const note = (await p.create({ collection: 'notes' as never, data: { text: 'first' } as never, overrideAccess: true, context: { tenant: 't1' } })) as Doc
     const orig = p.db.create.bind(p.db)
     const spy = vi.spyOn(p.db, 'create').mockImplementation(((args: { collection: string }) => (args.collection === 'audit-events' ? Promise.reject(new Error('made-up outage')) : orig(args as never))) as never)
     await p.update({ collection: 'notes' as never, id: note.id, data: { text: 'second' } as never, overrideAccess: true })
@@ -62,7 +62,7 @@ describe("onWriteError: 'log'", () => {
     const r1 = await verifyAuditTrail(p)
     expect(r1.firstBreak?.reason ?? null).toBeNull()
     // The chain carries on from the restored head.
-    await p.update({ collection: 'notes' as never, id: note.id, data: { text: 'third' } as never, overrideAccess: true })
+    await p.update({ collection: 'notes' as never, id: note.id, data: { text: 'third' } as never, overrideAccess: true, context: { tenant: 't1' } })
     expect(await verifyAuditTrail(p)).toMatchObject({ ok: true })
     await p.destroy()
   })
