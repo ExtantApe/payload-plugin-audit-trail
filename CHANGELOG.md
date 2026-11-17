@@ -10,6 +10,8 @@
 - Test teardown on Postgres now ends every database pool and waits for the connections to close before it stops the embedded server. Before, the run passed but reported 74 unhandled "terminating connection" errors and failed CI. Test-only; nothing in `src` changed. Tested: the Postgres suite, 110 passed, zero unhandled errors. Not tested: other Postgres versions.
 - Tested: all 110 tests on MongoDB (a replica set) and on PostgreSQL 18, with Payload 3.92.1, three runs of the Postgres suite without a failure. That covers entries on create, update and delete, the append-only and read refusals, verify, seals, adoption and pruning.
 - Not tested: SQLite, `@payloadcms/db-vercel-postgres`, Neon or any managed Postgres, older Postgres versions, and the MongoDB-only index drop and rebuild check (on Postgres that test checks the declared index and verify only). The savepoint path needs `@payloadcms/db-postgres/drizzle` or `@payloadcms/db-vercel-postgres/drizzle` to resolve; with neither it runs without one.
+## 0.1.0 (2026-11-13)
+
 - `verifyAuditTrail` no longer reads the whole trail into memory. It reads a page at a time (`pageSize`, default 1,000), keeps only the running state, and gives the same answer as before for every case tested. A read that fails, returns more than asked or comes back out of order now gives a failed result naming the place (`ok: false, finished: false`) where a failed read used to throw. Existing calls work unchanged.
 - New verify options: `from` (a seal's or checkpoint's digest: check only what was written after it), `stopAfter` (stop after that many entries; the result is not finished, never ok) and `onProgress`. The result gains `finished`, `partial`, `range` and `summary`, so a partial check can't be read as a full one.
 - The trail gets a compound index on `chainKey` and `seq`, which verify's paging sorts by. It's declared in the collection's `indexes`, not created by the plugin at startup.
@@ -28,8 +30,6 @@
 - `fromPluginEvent` finds Payload when an event has no `req`: from the event's `payload`, a `{ payload }` binding, or the one Payload the plugin started on (it refuses to guess between several). MFA's `start(payload, { userId })` raises such an event.
 - `fromPluginEvent` no longer rejects a plugin's action when the write fails for an event without a `req`: there's no transaction to undo, so it logs the error's name and returns. A mapper error, an unknown action or origin, or no Payload found still throw, with or without a `req`, as do failed writes with a `req`. `onError: 'fail'` throws always; `onError: 'log'` is as before, now logging the name only.
 - The README's `via` example records the Hats hat worn as well as the account, as Hats' README promises.
-
-## 0.1.0 (not yet published)
 
 - From the 2026-11-10 test self-audit: with `onWriteError: 'log'`, a failed entry can no longer undo the change it records (it's written through the database adapter in that mode), and without transactions the chain's head is put back when an entry fails, so verify never reports a break that didn't happen. Events recorded through `recordEvent` get the site's own fields from its `extra` resolver unless the caller gave them.
 
