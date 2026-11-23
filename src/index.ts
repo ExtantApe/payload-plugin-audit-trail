@@ -1226,7 +1226,7 @@ async function assertTransactions(payload: Payload, o: Resolved) {
   let id: string | number | null | undefined
   try {
     id = await payload.db.beginTransaction?.()
-    if (id) await payload.find({ collection: o.slug as never, limit: 1, depth: 0, overrideAccess: true, req: { payload, transactionID: id } as never })
+    if (id) await payload.find({ pagination: false, collection: o.slug as never, limit: 1, depth: 0, overrideAccess: true, req: { payload, transactionID: id } as never })
   } catch {
     id = null
   } finally {
