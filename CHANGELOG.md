@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A list field going from missing or null to `[]` is no longer listed as a change. A site that added an array field to users saw an entry on each older user's first save, with nothing changed. Missing, null and an empty list now compare equal, for readable fields and for hidden fields compared as stored. Adding or removing items still counts, and an empty string, `0` or `false` still differ from missing. The hash chain is untouched: only the comparison changed. Tested: 4 new unit tests on the comparison, full suite on MongoDB. Not tested here: Postgres (CI runs it) and the reporting site's own users.
+
 - Works on Payload's Postgres adapter (`@payloadcms/db-postgres`) as well as MongoDB. The plugin already used Payload's Local API and `where` queries, so three things changed:
   - Verify read entries sharing one millisecond in the wrong order when ids are numbers: it compared ids as text, so id 10 came before id 9, while the database and the seal sort them as numbers. A full verify after a seal could report a break on an intact trail. Ids are now compared as numbers when both are.
   - With `onWriteError: 'log'`, a failed entry write ran inside the change's transaction. Postgres aborts a transaction after a failed statement, which took the change with it. The write now runs inside a savepoint, rolled back if it fails, so the change stays. MongoDB is unchanged.

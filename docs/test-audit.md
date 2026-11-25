@@ -1,5 +1,9 @@
 # Test audit
 
+## 2026-11-24: missing vs empty list (K729)
+
+Promise: a list going from missing or null to `[]` isn't a change; gaining or losing items is; other empty values still differ. Covered by `test/changed.test.ts` (4 tests) on `changed` and `same`. Gap skipped: the stored-digest path for a hidden list field going missing to `[]`, since it uses the same empty rule in `fingerprint` and no hidden array field exists in the fixtures; adding one would mean a new collection field for one line.
+
 ## 2026-11-16: Postgres
 
 Promise: the plugin behaves the same on Payload's Postgres adapter as on MongoDB. Every one of the 110 tests runs on both (`npm test`, `npm run test:postgres`), so each row above maps to the same test on both databases. Postgres passed three runs in a row.
