@@ -115,7 +115,11 @@ const optionsOf = (payload: Payload): Resolved => {
 const isObject = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
 
 /** Relationships compare by id (the saved doc may be populated, the previous one not); array rows by content. */
+/** No value: missing, null, or an empty list. A list field added after a record was made reads back as [] on its first save. */
+const empty = (v: unknown) => v === null || v === undefined || (Array.isArray(v) && v.length === 0)
+
 export const same = (a: unknown, b: unknown): boolean => {
+  if (empty(a) && empty(b)) return true
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => same(x, b[i]))
   if (isObject(a) && !isObject(b) && 'id' in a) return String(a.id) === String(b)
   if (isObject(b) && !isObject(a) && 'id' in b) return String(b.id) === String(a)
@@ -129,8 +133,11 @@ export const same = (a: unknown, b: unknown): boolean => {
 /** Digests of stored values, by field, read from the database before and after a write. They stay in memory, never in an entry, `req.context` or a log. */
 export type Stored = { before?: Record<string, string>; after: Record<string, string> }
 
-/** A stored value's digest; a missing value, null or an empty group all read as "". */
-const fingerprint = (v: unknown) => (canonical(v) === null ? '' : valuesHash(v))
+/** A stored value's digest; a missing value, null, an empty group or an empty list all read as "". */
+const fingerprint = (v: unknown) => {
+  const c = canonical(v)
+  return c === null || (Array.isArray(c) && c.length === 0) ? '' : valuesHash(v)
+}
 const differs = (stored: Stored, k: string) => (stored.before?.[k] ?? '') !== (stored.after[k] ?? '')
 
 /**
