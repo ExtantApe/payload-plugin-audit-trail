@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-25)
 
 - A list field going from missing or null to `[]` is no longer listed as a change. A site that added an array field to users saw an entry on each older user's first save, with nothing changed. Missing, null and an empty list now compare equal, for readable fields and for hidden fields compared as stored. Adding or removing items still counts, and an empty string, `0` or `false` still differ from missing. The hash chain is untouched: only the comparison changed. Tested: 4 new unit tests on the comparison, full suite on MongoDB. Not tested here: Postgres (CI runs it) and the reporting site's own users.
 
